@@ -10,7 +10,7 @@ export const StepIndicator: React.FC<StepIndicatorProps> = ({ currentStep }) => 
     { id: AppState.IDLE, label: 'Upload' },
     { id: AppState.ANALYZING, label: 'Transcribe & Translate' },
     { id: AppState.REVIEW, label: 'Review Script' },
-    { id: AppState.SYNTHESIZING, label: 'AI Dubbing' },
+    { id: AppState.GENERATING, label: 'AI Dubbing' },
     { id: AppState.PLAYBACK, label: 'Play' },
   ];
 
@@ -30,7 +30,7 @@ export const StepIndicator: React.FC<StepIndicatorProps> = ({ currentStep }) => 
         <div className="absolute left-0 top-1/2 transform -translate-y-1/2 w-full h-1 bg-zinc-800 -z-10" />
         {steps.map((step, index) => {
           const status = getStatus(currentStep, currentIndex, index);
-          
+
           let circleClass = "bg-zinc-800 border-zinc-600 text-zinc-500";
           if (status === 'active') circleClass = "bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/50 scale-110";
           if (status === 'completed') circleClass = "bg-green-500 border-green-500 text-white";

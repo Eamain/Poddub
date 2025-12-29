@@ -14,8 +14,9 @@ start "PodDub Frontend" cmd /k "npm run dev"
 echo.
 echo ===================================================
 echo   Servers launched in separate windows.
-echo   Please wait for 'Local: http://localhost:5173'
-echo   to appear in the Frontend window.
+echo   Opening Browser at http://localhost:3000...
 echo ===================================================
+timeout /t 3 /nobreak >nul
+start http://localhost:3000
 echo.
 pause

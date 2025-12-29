@@ -93,20 +93,8 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({ onFileSelect, onPr
   };
 
   const handleJsonFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const json = JSON.parse(e.target?.result as string);
-        if (json.segments && json.detectedSpeakers) {
-          onProjectImport(json);
-        } else {
-          alert("Invalid project file format.");
-        }
-      } catch (err) {
-        alert("Failed to parse JSON file.");
-      }
-    };
-    reader.readAsText(file);
+    // Treat JSON import as a file upload so backend handles job creation
+    onFileSelect(file);
   };
 
   const onButtonClick = () => {

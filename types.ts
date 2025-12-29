@@ -16,13 +16,13 @@ export interface ProjectData extends ProcessedPodcast {
 }
 
 export enum AppState {
-  IDLE = 'IDLE',
-  ANALYZING = 'ANALYZING', // Transcribing & Translating
-  REVIEW = 'REVIEW', // User sees text
-  SYNTHESIZING = 'SYNTHESIZING', // Generating Full Audio
-  PREVIEWING = 'PREVIEWING', // Generating Short Preview
-  PLAYBACK = 'PLAYBACK', // Finished
-  ERROR = 'ERROR'
+  IDLE = 'idle',
+  ANALYZING = 'analyzing', // Transcribing & Translating
+  REVIEW = 'review', // User sees text
+  GENERATING = 'generating', // Generating Full Audio
+  PREVIEWING = 'previewing', // Generating Short Preview
+  PLAYBACK = 'playback', // Finished
+  ERROR = 'error'
 }
 
 export type AudioSource = 'UPLOAD' | 'MICROPHONE';

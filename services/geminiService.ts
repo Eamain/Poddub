@@ -384,13 +384,9 @@ export const optimizeScriptWithGemini = async (
     
     2. **Keep Proper Nouns in English**: Do NOT translate names of people (e.g. Elon Musk, Joe Rogan), places, countries, or companies. Keep them in their original English form in the Chinese translation.
     
-    3. **Insert Audio Tags** at the START or within the text to guide the TTS engine.
-       - Use \`[laugh]\` for humor/laughter.
-       - Use \`[sigh]\` for resignation.
-       - Use \`[excited]\` for high energy.
-       - Use \`[pause]\` for dramatic beats.
 
-    4. **Fix Grammar & Flow**: Ensure sentences flow smoothly. You can split or combine sentences if it improves the listening experience.
+
+    3. **Fix Grammar & Flow**: Ensure sentences flow smoothly. You can split or combine sentences if it improves the listening experience.
     
     Format:
     Input is a JSON list of objects.

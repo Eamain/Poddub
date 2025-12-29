@@ -10,7 +10,30 @@ from waitress import serve
 from google import genai
 import threading
 import subprocess
+import shutil
 from werkzeug.utils import secure_filename
+# Load .env.local explicitly
+from pathlib import Path
+current_path = Path(__file__).resolve()
+possible_envs = [
+    current_path.parent / '.env.local',
+    current_path.parent.parent / '.env.local',
+    current_path.parent.parent / 'Podcast_Tools' / 'Poddub_Minimax' / 'codes' / '.env.local'
+]
+for env_file in possible_envs:
+    if env_file.exists():
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                         k, v = line.split('=', 1)
+                         if k not in os.environ: # Don't overwrite system env
+                             os.environ[k] = v.strip().strip('"').strip("'")
+        except Exception as e:
+            print(f"Error loading {env_file}: {e}")
+
+import re
 
 # Paths
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -297,124 +320,26 @@ def transcribe_audio():
     return jsonify({"status": "started", "job_id": project_name})
 
 # --- Job Management ---
-class JobManager:
-    def __init__(self):
-        self.jobs = {}
-        self.lock = threading.Lock()
+from job_storage import JobStorage
+from pipeline_runner import PipelineRunner
 
-    def create_job(self, job_id, project_name):
-        with self.lock:
-            self.jobs[job_id] = {
-                "id": job_id,
-                "project_name": project_name,
-                "status": "pending",
-                "logs": [],
-                "progress": 0,
-                "result_path": None,
-                "error": None
-            }
-        return job_id
+# ... imports ...
 
-    def update_job(self, job_id, status=None, log=None, progress=None, result_path=None, error=None):
-        with self.lock:
-            if job_id not in self.jobs: return
-            if status: self.jobs[job_id]["status"] = status
-            if log: self.jobs[job_id]["logs"].append(log)
-            if progress is not None: self.jobs[job_id]["progress"] = progress
-            if result_path: self.jobs[job_id]["result_path"] = result_path
-            if error: self.jobs[job_id]["error"] = error
+# Initialize Persistent Storage
+JOBS_DIR = os.path.join(SERVER_DIR, "jobs")
+job_storage = JobStorage(JOBS_DIR)
 
-    def get_job(self, job_id):
-        with self.lock:
-            return self.jobs.get(job_id)
-
-job_manager = JobManager()
+# Initialize Pipeline Runner
+# Base tools is grandparent of server dir
+BASE_TOOLS_DIR = os.path.dirname(os.path.dirname(SERVER_DIR))
+pipeline_runner = PipelineRunner(job_storage, BASE_TOOLS_DIR)
 
 # --- Background Processing ---
-def run_backend_pipeline(job_id, file_path, project_name):
-    try:
-        job_manager.update_job(job_id, status="transcribing", log=f"Starting transcription for {project_name}...", progress=5)
-        
-        # 1. Transcribe
-        # SERVER_DIR = .../poddub-ai/server
-        # dirname(SERVER_DIR) = .../poddub-ai
-        # dirname(dirname(SERVER_DIR)) = .../Playground
-        base_tools = os.path.dirname(os.path.dirname(SERVER_DIR)) 
-        transcribe_script = os.path.join(base_tools, "Podcast_Tools", "Audio_to_Transcription", "Audio_to_Transcription.py")
-        
-        # We need to interpret stdout to update logs
-        cmd_trans = [sys.executable, transcribe_script, file_path]
-        
-        # Inject API Key into subprocess env
-        env = os.environ.copy()
-        if GEMINI_API_KEY:
-             env["GEMINI_API_KEY"] = GEMINI_API_KEY
-        
-        process = subprocess.Popen(cmd_trans, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding='utf-8', env=env)
-        
-        # Capture output for debugging
-        full_output = []
-        for line in iter(process.stdout.readline, ''):
-            line = line.strip()
-            if line:
-                full_output.append(line)
-                job_manager.update_job(job_id, log=f"[Transcribe] {line}")
-        
-        process.wait()
-        if process.returncode != 0:
-            error_details = "\n".join(full_output[-5:]) # Last 5 lines
-            raise Exception(f"Transcription failed. Code: {process.returncode}. Last logs: {error_details}")
+def run_backend_analysis(job_id, file_path, project_name):
+    pipeline_runner.run_analysis_phase(job_id, file_path, project_name)
 
-        job_manager.update_job(job_id, status="polishing", log="Transcription complete. Starting Polishing...", progress=40)
-
-        # 2. Polish
-        # Infer JSON path from standard output structure of Audio_to_Transcription
-        # usually 00Outputfiles/<ProjectName>/<ProjectName>.json
-        # But wait, Audio_to_Transcription creates based on input filename?
-        # Let's assume standard behavior:
-        base_filename = os.path.splitext(os.path.basename(file_path))[0]
-        # It creates a folder in 00Outputfiles? 
-        # Actually, let's look for the json file in the likely location.
-        output_files_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", base_filename)
-        json_path = os.path.join(output_files_dir, f"{base_filename}.json")
-        
-        if not os.path.exists(json_path):
-            # Fallback search
-             job_manager.update_job(job_id, log=f"Warning: Expected JSON at {json_path} not found. Searching...")
-             # ... implementation detail ...
-
-        polish_script = os.path.join(base_tools, "Podcast_Tools", "Translation_Polishing", "poddub_polish.py")
-        cmd_polish = [sys.executable, polish_script, json_path]
-        
-        process = subprocess.Popen(cmd_polish, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding='utf-8')
-        
-        for line in iter(process.stdout.readline, ''):
-            line = line.strip()
-            if line:
-                job_manager.update_job(job_id, log=f"[Polish] {line}")
-                # Try to parse progress from logs like "Processing Batch 1/23"
-                if "Processing Batch" in line:
-                    try:
-                        # logical guess at progress 40 -> 90
-                        job_manager.update_job(job_id, progress=60) 
-                    except: pass
-        
-        process.wait()
-        if process.returncode != 0:
-            raise Exception("Polishing failed.")
-
-        # 3. Finalize
-        # The polished file is typically named *_polished.json or just updates the original depending on script version.
-        # poddub_polish.py typically creates `..._polished.json`
-        polished_json_path = json_path.replace(".json", "_polished.json")
-        if not os.path.exists(polished_json_path):
-             polished_json_path = json_path # Fallback if it overwrote
-
-        job_manager.update_job(job_id, status="completed", log="Pipeline Finished Successfully!", progress=100, result_path=polished_json_path)
-
-    except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}")
-        job_manager.update_job(job_id, status="failed", error=str(e), log=f"CRITICAL ERROR: {e}")
+def run_backend_generation(job_id, project_name):
+    pipeline_runner.run_generation_phase(job_id, project_name)
 
 @app.route('/api/process_upload', methods=['POST'])
 def process_upload():
@@ -426,40 +351,331 @@ def process_upload():
         return jsonify({"error": "No selected file"}), 400
         
     filename = secure_filename(file.filename)
+    # Generate ID based on timestamp
     job_id = f"job_{int(os.times()[4] * 100)}"
     project_name = os.path.splitext(filename)[0]
     
-    # Save to temp
+    # Save to uploads folder
     upload_path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(upload_path)
     
-    job_manager.create_job(job_id, project_name)
+    # Create persistent job
+    job_storage.create_job(job_id, project_name)
     
-    thread = threading.Thread(target=run_backend_pipeline, args=(job_id, upload_path, project_name))
-    thread.start()
+    # Check if this is a pre-processed JSON import
+    if filename.lower().endswith('.json'):
+        # 1. Setup Project Directory
+        base_tools = os.path.dirname(os.path.dirname(SERVER_DIR))
+        project_output_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", project_name)
+        if not os.path.exists(project_output_dir): os.makedirs(project_output_dir)
+        
+        # 2. Copy JSON to standard location
+        final_json_path = os.path.join(project_output_dir, f"{project_name}.json")
+        try:
+            shutil.copy(upload_path, final_json_path)
+        except Exception as e:
+            logger.error(f"Failed to copy imported JSON: {e}")
+            return jsonify({"error": "Failed to import project file"}), 500
+            
+        # 3. Update Job properly
+        # We assume stages are completed
+        job_storage.update_job(job_id, status='awaiting_review', transcript_path=final_json_path)
+        job_storage.update_stage(job_id, 'transcribe', status='completed', percent=100)
+        job_storage.update_stage(job_id, 'polish', status='completed', percent=100)
+        
+        logger.info(f"Imported project {project_name} from JSON.")
+        
+    else:
+        # Start thread for ANALYSIS PHASE only (Audio)
+        thread = threading.Thread(target=run_backend_analysis, args=(job_id, upload_path, project_name))
+        thread.start()
     
     return jsonify({"status": "started", "job_id": job_id, "project_name": project_name})
 
+@app.route('/api/start_generation', methods=['POST'])
+def start_generation():
+    data = request.json
+    job_id = data.get('job_id')
+    project_name = data.get('project_name')
+    
+    if not job_id or not project_name:
+        return jsonify({"error": "Missing job_id or project_name"}), 400
+
+    # Start thread for GENERATION PHASE
+    thread = threading.Thread(target=run_backend_generation, args=(job_id, project_name))
+    thread.start()
+    
+    return jsonify({"status": "started", "message": "Generation phase started"})
+
+
+
+@app.route('/api/save_voices', methods=['POST'])
+def save_voices_map():
+    data = request.json
+    voice_map = data.get('voice_map') # {"Speaker 0": "VoiceID", ...}
+    
+    if not voice_map:
+        return jsonify({"error": "No voice map provided"}), 400
+
+    # Write to saved_voices.json in Podcast_Tools
+    try:
+        saved_voices_path = os.path.join(BASE_TOOLS_DIR, "Podcast_Tools", "saved_voices.json")
+        with open(saved_voices_path, 'w', encoding='utf-8') as f:
+            json.dump(voice_map, f, indent=4)
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/job_status/<job_id>', methods=['GET'])
 def get_job_status(job_id):
-    job = job_manager.get_job(job_id)
+    job = job_storage.get_job(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
 @app.route('/api/get_result/<job_id>', methods=['GET'])
 def get_job_result(job_id):
-    job = job_manager.get_job(job_id)
-    if not job or job['status'] != 'completed':
-        return jsonify({"error": "Job not ready"}), 400
+    job = job_storage.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+        
+    status = job.get('status')
+    file_path = None
     
-    return send_file(job['result_path'], as_attachment=True)
+    if status == 'completed':
+        file_path = job.get('result_path')
+    elif status == 'awaiting_review':
+        file_path = job.get('transcript_path')
+        if not file_path:
+             # Fallback if pipeline_runner didn't save it yet (for old jobs)
+             # Try to infer it from project name?
+             # For now, just error or try to find it.
+             pass
+    else:
+        return jsonify({"error": f"Job not ready (Status: {status})"}), 400
+    
+    if not file_path or not os.path.exists(file_path):
+         return jsonify({"error": f"Result file missing: {file_path}"}), 404
+
+    return send_file(file_path, as_attachment=True)
+
+@app.route('/api/list_project_files/<job_id>', methods=['GET'])
+def list_project_files(job_id):
+    job = job_storage.get_job(job_id)
+    if not job: return jsonify({"error": "Job not found"}), 404
+    
+    # Try to find project dir
+    transcript_path = job.get('transcript_path')
+    if not transcript_path:
+        # Try finding via project name in output dir as fallback
+        project_name = job.get('project_name')
+        if project_name:
+             # SERVER_DIR/output/project_name
+             # But WAIT, output_dir was SERVER_DIR/output
+             # pipeline uses BASE_TOOLS/Podcast_Tools/00Outputfiles...
+             # We need to be careful.
+             # tts_server.py line 274: project_output_dir = os.path.join(OUTPUT_DIR, project_name)
+             # But pipeline_runner.py line 80: output_base = os.path.join(self.base_tools, "Podcast_Tools", "00Outputfiles", project_name)
+             # They are DIFFERENT LOCATIONS!
+             # server/output vs Podcast_Tools/00Outputfiles.
+             # pipeline_runner writes to Podcast_Tools/00Outputfiles.
+             # So we must look there.
+             base_tools = os.path.dirname(os.path.dirname(SERVER_DIR))
+             project_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", project_name)
+    else:
+        project_dir = os.path.dirname(transcript_path)
+
+    if not os.path.exists(project_dir):
+        return jsonify({"files": []}) # Or error
+
+    files = []
+    project_name = job.get('project_name', '')
+    
+    try:
+        for f in os.listdir(project_dir):
+            if f.endswith(".md"):
+                # Identify Type
+                file_type = "Outline" # Default to Outline for generated articles
+                
+                if f == f"{project_name}.md":
+                    file_type = "Bilingual Transcript"
+                elif "AI_Summary" in f:
+                    file_type = "AI Summary"
+                elif "summary" in f.lower() or "摘要" in f:
+                    file_type = "Legacy Summary"
+                elif "Outline" in f:
+                    file_type = "Outline"
+                
+                # If we have multiple Outlines, they will all be listed.
+                
+                files.append({
+                    "name": f,
+                    "type": file_type,
+                    "size": os.path.getsize(os.path.join(project_dir, f)),
+                    "mtime": os.path.getmtime(os.path.join(project_dir, f))
+                })
+    except Exception as e:
+        logger.error(f"Error listing files: {e}")
+        
+    # Filter: Keep only the LATEST of generated types to reduce clutter
+    final_files = []
+    
+    outlines = [f for f in files if f['type'] == 'Outline']
+    ai_summaries = [f for f in files if f['type'] == 'AI Summary']
+    others = [f for f in files if f['type'] not in ['Outline', 'AI Summary', 'Legacy Summary']]
+    
+    if outlines:
+        outlines.sort(key=lambda x: x['mtime'], reverse=True)
+        final_files.append(outlines[0])
+        
+    if ai_summaries:
+        ai_summaries.sort(key=lambda x: x['mtime'], reverse=True)
+        final_files.append(ai_summaries[0])
+        
+    final_files.extend(others)
+
+    return jsonify({"files": final_files})
+
+@app.route('/api/download_file/<job_id>', methods=['GET'])
+def download_project_file(job_id):
+    filename = request.args.get('file')
+    if not filename: return jsonify({"error": "Missing file param"}), 400
+    
+    job = job_storage.get_job(job_id)
+    if not job: return jsonify({"error": "Job not found"}), 404
+    
+    # Resolve Directory (Same logic as above)
+    transcript_path = job.get('transcript_path')
+    if transcript_path:
+        project_dir = os.path.dirname(transcript_path)
+    else:
+        project_name = job.get('project_name')
+        base_tools = os.path.dirname(os.path.dirname(SERVER_DIR))
+        project_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", project_name)
+
+    file_path = os.path.join(project_dir, filename) # Use original filename but check traversal
+    
+    # Simple directory traversal check
+    if os.path.relpath(file_path, start=project_dir).startswith(".."):
+         return jsonify({"error": "Invalid filename"}), 400
+
+    if not os.path.exists(file_path):
+        return jsonify({"error": "File not found"}), 404
+        
+    return send_file(file_path, as_attachment=True, download_name=filename)
+
+
+
+@app.route('/api/get_voices', methods=['GET'])
+def get_voices():
+    # 1. Start with Default Minimax Voices
+    voice_list = []
+    for name, vid in MINIMAX_VOICES.items():
+        voice_list.append({"name": f"{name} (Default)", "id": vid})
+
+    # 2. Add Saved/Cloned Voices
+    # SERVER_DIR = .../poddub-ai/server
+    # dirname(SERVER_DIR) = .../poddub-ai
+    # dirname(...) = .../Playground
+    base_playground = os.path.dirname(os.path.dirname(SERVER_DIR))
+    saved_voices_path = os.path.join(base_playground, "Podcast_Tools", "saved_voices.json")
+    
+    if os.path.exists(saved_voices_path):
+        try:
+            with open(saved_voices_path, 'r', encoding='utf-8') as f:
+                saved_map = json.load(f)
+                for speaker, vid in saved_map.items():
+                    # Check if this ID is a default one
+                    is_default = any(v['id'] == vid for v in voice_list)
+                    if not is_default:
+                        # User requested ID in name to avoid confusion
+                        voice_list.append({"name": f"{speaker} (ID: {vid})", "id": vid})
+        except Exception as e:
+            logger.error(f"Error loading saved voices: {e}")
+            
+    return jsonify({"voices": voice_list})
+
+@app.route('/api/generate_doc', methods=['POST'])
+def generate_doc():
+    data = request.json
+    job_id = data.get('job_id')
+    doc_type = data.get('doc_type') # 'outline' or 'summary'
+    
+    if not job_id or doc_type not in ['outline', 'summary']:
+        return jsonify({"error": "Invalid parameters"}), 400
+        
+    job = job_storage.get_job(job_id)
+    if not job: return jsonify({"error": "Job not found"}), 404
+    
+    transcript_path = job.get('transcript_path')
+    if not transcript_path or not os.path.exists(transcript_path):
+        return jsonify({"error": "Transcript not found"}), 400
+        
+    # Determine script path
+    base_playground = os.path.dirname(os.path.dirname(SERVER_DIR))
+    podcast_tools_dir = os.path.join(base_playground, "Podcast_Tools")
+
+    if doc_type == 'outline':
+        script_path = os.path.join(podcast_tools_dir, "Podcast_Outline", "generate_outline.py")
+    else:
+        script_path = os.path.join(podcast_tools_dir, "Podcast_Summary", "Generate_Summary.py")
+        
+    # Output dir (same as transcript dir)
+    output_dir = os.path.dirname(transcript_path)
+    
+    def run_task():
+        try:
+            pipeline_runner.log(job_id, f"Manually generating {doc_type}...")
+            
+            # Cleanup skipped to prevent data loss on failure - Scripts will overwrite
+            # try:
+            #     project_name = job.get('project_name')
+            #     for f in os.listdir(output_dir):
+            #         # Protect source files
+            #         if f == f"{project_name}.md" or f == f"{project_name}.json":
+            #             continue
+            #             
+            #         f_path = os.path.join(output_dir, f)
+            #         if doc_type == 'outline':
+            #             if ("Outline" in f or "outline" in f) and f.endswith(".md"):
+            #                  # os.remove(f_path)
+            #                  pass
+            #         elif doc_type == 'summary':
+            #             if (("summary" in f.lower() or "摘要" in f) and f.endswith(".md")) or "AI_Summary" in f:
+            #                  # os.remove(f_path)
+            #                  pass
+            # except Exception as e:
+            #     pipeline_runner.log(job_id, f"Cleanup warning: {e}")
+            
+            if doc_type == 'outline':
+                cmd = [sys.executable, script_path, transcript_path, "--outdir", output_dir]
+                pipeline_runner.run_command(job_id, cmd)
+                pipeline_runner.storage.update_stage(job_id, 'analysis', outline=True)
+                
+            else: # summary
+                project_name = job.get('project_name', 'Unknown')
+                output_filename = f"{project_name}_AI_Summary.md"
+                output_path = os.path.join(output_dir, output_filename)
+                
+                cmd = [sys.executable, script_path, "--json", transcript_path, "--output", output_path, "--project", project_name]
+                pipeline_runner.run_command(job_id, cmd)
+                pipeline_runner.storage.update_stage(job_id, 'analysis', summary=True)
+            
+            pipeline_runner.log(job_id, f"{doc_type.capitalize()} generation complete.")
+            
+        except Exception as e:
+            pipeline_runner.log(job_id, f"Error generating {doc_type}: {e}")
+
+    thread = threading.Thread(target=run_task)
+    thread.start()
+    
+    return jsonify({"status": "started", "message": f"Generating {doc_type}..."})
 
 @app.route('/api/voice_check', methods=['POST'])
 def voice_check():
     # Load saved_voices.json from Podcast_Tools (source of truth)
-    base_tools = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SERVER_DIR))), "Podcast_Tools")
-    saved_voices_path = os.path.join(base_tools, "saved_voices.json")
+    base_playground = os.path.dirname(os.path.dirname(SERVER_DIR))
+    saved_voices_path = os.path.join(base_playground, "Podcast_Tools", "saved_voices.json")
     
     data = {}
     if os.path.exists(saved_voices_path):
@@ -485,7 +701,20 @@ def generate_full():
     json_path = os.path.join(project_dir, f"{project_name}.json")
     
     if not os.path.exists(json_path):
-        return jsonify({"error": f"Project file not found: {json_path}"}), 404
+        # Fallback: Check Podcast_Tools/00Outputfiles
+        # SERVER_DIR is .../poddub-ai/server, so grandparanet is playground
+        base_tools = os.path.dirname(os.path.dirname(SERVER_DIR))
+        fallback_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", project_name)
+        fallback_path = os.path.join(fallback_dir, f"{project_name}.json")
+        
+        if os.path.exists(fallback_path):
+            logger.info(f"Found project file in fallback location: {fallback_path}")
+            json_path = fallback_path
+            # Also update project_dir to where the file actually is, so generate.py runs there?
+            # actually generate.py might expect to run in place. 
+            # We pass json_path to generate.py. 
+        else:
+            return jsonify({"error": f"Project file not found: {json_path} (checked fallback: {fallback_path})"}), 404
 
     # 1. Save temporary voice_map.json usually? 
     # Actually generate.py in `Podcast_Tools` loads `saved_voices.json` (global) OR we can pass args?
@@ -498,8 +727,12 @@ def generate_full():
     # SAFE OPTION: Write a temp voice map and pass it if script supports it, OR Update the global `saved_voices.json` with the UI selection.
     
     # Let's update global saved_voices.json since that's the source of truth for "My Voices".
-    base_tools = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(SERVER_DIR))), "Podcast_Tools")
-    saved_voices_path = os.path.join(base_tools, "saved_voices.json")
+    # Let's update global saved_voices.json since that's the source of truth for "My Voices".
+    # SERVER_DIR is .../poddub-ai/server
+    # dirname -> poddub-ai
+    # dirname -> Playground
+    base_playground = os.path.dirname(os.path.dirname(SERVER_DIR))
+    saved_voices_path = os.path.join(base_playground, "Podcast_Tools", "saved_voices.json")
     
     try:
         # Load existing
@@ -523,7 +756,8 @@ def generate_full():
     # It generates audio in the same folder.
     # Use NON-BLOCKING thread
     
-    script_path = os.path.join(ENGINE_DIR, "generate.py")
+    # Point to external generate.py in Podcast_Tools/Poddub_Minimax/codes/
+    script_path = os.path.join(base_playground, "Podcast_Tools", "Poddub_Minimax", "codes", "generate.py")
     
     def run_gen_task():
         # Using sys.executable to ensure same env
