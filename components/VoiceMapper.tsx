@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mic2, Save, Play, Check } from 'lucide-react';
+import { Mic2, Save, Play, Check, Loader2 } from 'lucide-react';
 import { Button } from './Button';
 
 interface Voice {
@@ -60,6 +60,42 @@ export const VoiceMapper: React.FC<VoiceMapperProps> = ({ speakers, onConfirm, i
         onConfirm(voiceMap);
     };
 
+    const [playingVoice, setPlayingVoice] = useState<string | null>(null);
+    const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+    const handlePreview = async (voiceId: string) => {
+        if (!voiceId) return;
+        if (playingVoice === voiceId) return; // Prevent double click
+
+        try {
+            setPlayingVoice(voiceId);
+            // Append timestamp to prevent browser caching of old previews
+            const res = await fetch(`http://localhost:8000/api/preview_voice?voice_id=${encodeURIComponent(voiceId)}&t=${Date.now()}`);
+            if (!res.ok) throw new Error("Failed to fetch preview");
+
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+
+            if (audioRef.current) {
+                audioRef.current.pause();
+                audioRef.current = null;
+            }
+
+            const audio = new Audio(url);
+            audioRef.current = audio;
+            audio.onended = () => setPlayingVoice(null);
+            audio.onerror = () => {
+                setPlayingVoice(null);
+                console.error("Audio playback error");
+            };
+
+            await audio.play();
+        } catch (e) {
+            console.error("Preview failed", e);
+            setPlayingVoice(null);
+        }
+    };
+
     if (loading) return <div className="text-zinc-500 text-sm">Loading voices...</div>;
 
     return (
@@ -84,16 +120,31 @@ export const VoiceMapper: React.FC<VoiceMapperProps> = ({ speakers, onConfirm, i
                             <span className="text-zinc-300 font-medium">{spk}</span>
                         </div>
 
-                        <select
-                            value={voiceMap[spk] || ""}
-                            onChange={(e) => handleVoiceChange(spk, e.target.value)}
-                            className="bg-zinc-800 text-sm text-zinc-200 border border-zinc-700 rounded px-3 py-2 outline-none focus:border-purple-500 min-w-[200px]"
-                        >
-                            <option value="" disabled>Select a Voice...</option>
-                            {voices.map(v => (
-                                <option key={v.id} value={v.id}>{v.name}</option>
-                            ))}
-                        </select>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => handlePreview(voiceMap[spk])}
+                                disabled={!voiceMap[spk] || playingVoice === voiceMap[spk]}
+                                className="p-2 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Preview Voice"
+                            >
+                                {playingVoice === voiceMap[spk] ? (
+                                    <Loader2 className="w-4 h-4 animate-spin text-purple-500" />
+                                ) : (
+                                    <Play className="w-4 h-4" />
+                                )}
+                            </button>
+
+                            <select
+                                value={voiceMap[spk] || ""}
+                                onChange={(e) => handleVoiceChange(spk, e.target.value)}
+                                className="bg-zinc-800 text-sm text-zinc-200 border border-zinc-700 rounded px-3 py-2 outline-none focus:border-purple-500 min-w-[200px]"
+                            >
+                                <option value="" disabled>Select a Voice...</option>
+                                {voices.map(v => (
+                                    <option key={v.id} value={v.id}>{v.name}</option>
+                                ))}
+                            </select>
+                        </div>
                     </div>
                 ))}
             </div>

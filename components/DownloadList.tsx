@@ -33,10 +33,17 @@ export const DownloadList: React.FC<DownloadListProps> = ({ files, jobId, onRefr
             });
             // Wait a bit for file to be created then refresh
             // Poll for 10 seconds
+            // Wait and poll for file appearance
+            const checkInterval = setInterval(() => {
+                if (onRefresh) onRefresh();
+            }, 2000);
+
+            // Stop polling after 12 seconds
             setTimeout(() => {
+                clearInterval(checkInterval);
                 setGenerating(null);
                 if (onRefresh) onRefresh();
-            }, 10000);
+            }, 12000);
         } catch (e: any) {
             console.error(e);
             setGenerating(null);
@@ -52,7 +59,7 @@ export const DownloadList: React.FC<DownloadListProps> = ({ files, jobId, onRefr
                     Project Documents
                     <button
                         onClick={() => onRefresh && onRefresh()}
-                        className="ml-2 p-1 text-zinc-500 hover:text-white rounded-full hover:bg-zinc-800 transition-colors"
+                        className="ml-2 p-1.5 text-zinc-500 hover:text-white hover:bg-zinc-800 rounded-full transition-colors"
                         title="Refresh List"
                     >
                         <RefreshCw className="w-4 h-4" />
@@ -67,15 +74,6 @@ export const DownloadList: React.FC<DownloadListProps> = ({ files, jobId, onRefr
                         className="text-xs h-8 bg-zinc-800 hover:bg-zinc-700 border-zinc-700"
                     >
                         Generate Outline
-                    </Button>
-                    <Button
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => handleGenerate('summary')}
-                        isLoading={generating === 'summary'}
-                        className="text-xs h-8 bg-zinc-800 hover:bg-zinc-700 border-zinc-700"
-                    >
-                        Generate Summary
                     </Button>
                 </div>
             </div>

@@ -300,6 +300,40 @@ const App: React.FC = () => {
     };
 
 
+    const handleProjectImport = (projectData: ProjectData) => {
+        try {
+            // Defensive Sanitization
+            const cleanSegments = Array.isArray(projectData.segments)
+                ? projectData.segments.map(s => ({
+                    speaker: s.speaker || "Unknown Speaker",
+                    originalEnglish: s.originalEnglish || "",
+                    translatedChinese: s.translatedChinese || ""
+                }))
+                : [];
+
+            const cleanSpeakers = Array.isArray(projectData.detectedSpeakers)
+                ? projectData.detectedSpeakers.map(s => String(s || "Unknown"))
+                : Array.from(new Set(cleanSegments.map(s => s.speaker)));
+
+            setData({
+                segments: cleanSegments,
+                detectedSpeakers: cleanSpeakers
+            });
+
+            // If we have data, we go to REVIEW state
+            if (cleanSegments.length > 0) {
+                setAppState(AppState.REVIEW);
+                setShowVoiceMap(true);
+                addLog("Session Restored from Auto-Save", 'success');
+
+                // We might not have a jobId if it was local only
+            }
+        } catch (e) {
+            console.error("Failed to import project", e);
+            setError("Failed to restore session data.");
+        }
+    };
+
     return (
         <div className="fixed inset-0 flex flex-col items-center overflow-hidden bg-[#09090b]">
             <div className="absolute top-0 left-0 w-full h-full pointer-events-none -z-10">
@@ -343,7 +377,7 @@ const App: React.FC = () => {
                 {appState === AppState.IDLE && (
                     <AudioUploader
                         onFileSelect={handleFileSelect}
-                        onProjectImport={() => { }}
+                        onProjectImport={handleProjectImport}
                         isProcessing={false}
                     />
                 )}
@@ -397,6 +431,13 @@ const App: React.FC = () => {
                         />
 
                         {/* VOICE MAPPER - Shown when waiting for review */}
+                        {error && (
+                            <div className="w-full max-w-2xl p-4 bg-red-900/20 border border-red-900/50 rounded-lg text-red-200 text-center flex items-center justify-center gap-2 animate-in fade-in slide-in-from-top-2">
+                                <AlertTriangle className="w-5 h-5" />
+                                <span>{error}</span>
+                            </div>
+                        )}
+
                         {showVoiceMap && (
                             <VoiceMapper
                                 speakers={data.detectedSpeakers}

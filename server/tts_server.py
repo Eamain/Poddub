@@ -383,6 +383,9 @@ def process_upload():
         job_storage.update_stage(job_id, 'transcribe', status='completed', percent=100)
         job_storage.update_stage(job_id, 'polish', status='completed', percent=100)
         
+        # Add transcript to tracked files
+        job_storage.add_file(job_id, f"{project_name}.json", "Bilingual Transcript", final_json_path)
+        
         logger.info(f"Imported project {project_name} from JSON.")
         
     else:
@@ -464,75 +467,19 @@ def list_project_files(job_id):
     job = job_storage.get_job(job_id)
     if not job: return jsonify({"error": "Job not found"}), 404
     
-    # Try to find project dir
-    transcript_path = job.get('transcript_path')
-    if not transcript_path:
-        # Try finding via project name in output dir as fallback
-        project_name = job.get('project_name')
-        if project_name:
-             # SERVER_DIR/output/project_name
-             # But WAIT, output_dir was SERVER_DIR/output
-             # pipeline uses BASE_TOOLS/Podcast_Tools/00Outputfiles...
-             # We need to be careful.
-             # tts_server.py line 274: project_output_dir = os.path.join(OUTPUT_DIR, project_name)
-             # But pipeline_runner.py line 80: output_base = os.path.join(self.base_tools, "Podcast_Tools", "00Outputfiles", project_name)
-             # They are DIFFERENT LOCATIONS!
-             # server/output vs Podcast_Tools/00Outputfiles.
-             # pipeline_runner writes to Podcast_Tools/00Outputfiles.
-             # So we must look there.
-             base_tools = os.path.dirname(os.path.dirname(SERVER_DIR))
-             project_dir = os.path.join(base_tools, "Podcast_Tools", "00Outputfiles", project_name)
-    else:
-        project_dir = os.path.dirname(transcript_path)
-
-    if not os.path.exists(project_dir):
-        return jsonify({"files": []}) # Or error
-
-    files = []
-    project_name = job.get('project_name', '')
+    # State-based file listing (User Request: Do NOT match from folder)
+    # We only return files that have been explicitly tracked in the job state.
+    files = job.get('files', [])
     
-    try:
-        for f in os.listdir(project_dir):
-            if f.endswith(".md"):
-                # Identify Type
-                file_type = "Outline" # Default to Outline for generated articles
-                
-                if f == f"{project_name}.md":
-                    file_type = "Bilingual Transcript"
-                elif "AI_Summary" in f:
-                    file_type = "AI Summary"
-                elif "summary" in f.lower() or "摘要" in f:
-                    file_type = "Legacy Summary"
-                elif "Outline" in f:
-                    file_type = "Outline"
-                
-                # If we have multiple Outlines, they will all be listed.
-                
-                files.append({
-                    "name": f,
-                    "type": file_type,
-                    "size": os.path.getsize(os.path.join(project_dir, f)),
-                    "mtime": os.path.getmtime(os.path.join(project_dir, f))
-                })
-    except Exception as e:
-        logger.error(f"Error listing files: {e}")
-        
-    # Filter: Keep only the LATEST of generated types to reduce clutter
+    # Enrich with size if file exists on disk, otherwise mark missing
     final_files = []
-    
-    outlines = [f for f in files if f['type'] == 'Outline']
-    ai_summaries = [f for f in files if f['type'] == 'AI Summary']
-    others = [f for f in files if f['type'] not in ['Outline', 'AI Summary', 'Legacy Summary']]
-    
-    if outlines:
-        outlines.sort(key=lambda x: x['mtime'], reverse=True)
-        final_files.append(outlines[0])
-        
-    if ai_summaries:
-        ai_summaries.sort(key=lambda x: x['mtime'], reverse=True)
-        final_files.append(ai_summaries[0])
-        
-    final_files.extend(others)
+    for f_entry in files:
+        if os.path.exists(f_entry['path']):
+            f_entry['size'] = os.path.getsize(f_entry['path'])
+            final_files.append(f_entry)
+        else:
+             # Skip missing files or keep them? safer to skip if they were deleted manually
+             pass
 
     return jsonify({"files": final_files})
 
@@ -652,6 +599,34 @@ def generate_doc():
                 pipeline_runner.run_command(job_id, cmd)
                 pipeline_runner.storage.update_stage(job_id, 'analysis', outline=True)
                 
+                # State Update: Track generated file
+                # We need to predict the filename or scan ONLY for the NEW file.
+                # generate_outline.py returns the output path. run_command usually captures output?
+                # For now, let's scan for the newest Outline file and add it.
+                # This is a safe "scan" because it's targeted after an action, but better if script returned it.
+                # Since we replaced the generic list logic, we must explicit add here.
+                
+                # Try to find the expected file
+                # generate_outline logic: f"{safe_title}_Outline.md" OR f"{base_name}_Outline.md"
+                # Let's look for any *new* .md file with Outline in name?
+                # Or just list all Outlines and pick latest?
+                # User hates scanning. But we just generated it.
+                # To be precise, our updated generate_outline creates f"{safe_title}_Outline.md".
+                # We can't easily know safe_title here without parsing logic.
+                # Let's Iterate output_dir and find the Outline.md that was modified recently.
+                
+                candidates = []
+                for f in os.listdir(output_dir):
+                    if "Outline" in f and f.endswith(".md"):
+                         f_path = os.path.join(output_dir, f)
+                         candidates.append((f_path, os.path.getmtime(f_path)))
+                
+                if candidates:
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    latest_outline = candidates[0][0]
+                    f_name = os.path.basename(latest_outline)
+                    job_storage.add_file(job_id, f_name, "Outline", latest_outline) 
+                
             else: # summary
                 project_name = job.get('project_name', 'Unknown')
                 output_filename = f"{project_name}_AI_Summary.md"
@@ -660,6 +635,10 @@ def generate_doc():
                 cmd = [sys.executable, script_path, "--json", transcript_path, "--output", output_path, "--project", project_name]
                 pipeline_runner.run_command(job_id, cmd)
                 pipeline_runner.storage.update_stage(job_id, 'analysis', summary=True)
+                
+                # State Update
+                if os.path.exists(output_path):
+                     job_storage.add_file(job_id, output_filename, "AI Summary", output_path)
             
             pipeline_runner.log(job_id, f"{doc_type.capitalize()} generation complete.")
             
@@ -778,6 +757,92 @@ def generate_full():
     thread.start()
 
     return jsonify({"status": "started", "message": "Audio generation started", "project": project_name})
+
+# --- Voice Preview & Caching ---
+PREVIEW_CACHE_DIR = os.path.join(SERVER_DIR, "cache", "previews")
+if not os.path.exists(PREVIEW_CACHE_DIR): os.makedirs(PREVIEW_CACHE_DIR)
+
+@app.route('/api/preview_voice', methods=['GET'])
+def preview_voice():
+    voice_id = request.args.get('voice_id')
+    # Default text: English + Chinese (2 sentences total as requested)
+    default_text = "Hello, this is a preview of my voice. 大家好，这是我的中文语音预览。"
+    text = request.args.get('text', default_text)
+    
+    if not voice_id:
+        return jsonify({"error": "Missing voice_id"}), 400
+
+    # Sanitize voice_id for filename
+    safe_vid = "".join([c for c in voice_id if c.isalnum() or c in ('-', '_')])
+    cache_filename = f"{safe_vid}.mp3" 
+    cache_path = os.path.join(PREVIEW_CACHE_DIR, cache_filename)
+
+    # 1. FORCE REAL-TIME GENERATION (User Request)
+    # We remove the cache check to ensure every click generates fresh audio.
+    # if os.path.exists(cache_path):
+    #    return send_file(cache_path, mimetype="audio/mpeg")
+
+    # 2. Generate New
+    try:
+        # Determine provider based on ID format or trial
+        # Minimax IDs are usually strings/integers. 
+        # Gemini does not have "voices" in the same way, but let's assume Minimax for now 
+        # as get_voices mainly returns Minimax voices.
+        
+        # NOTE: We need to use `generate_with_minimax` but it expects 'speaker' name to lookup ID.
+        # We have the ID directly. We need a lower-level generate function or hack it.
+        # Refactoring generate_with_minimax to take voice_id directly would be cleaner,
+        # but let's just make a direct call here to avoid breaking existing code.
+        
+        if not MINIMAX_API_KEY or not MINIMAX_GROUP_ID:
+             raise Exception("Minimax API not configured")
+
+        url = f"https://api.minimax.chat/v1/t2a_v2?GroupId={MINIMAX_GROUP_ID}"
+        headers = {
+            "Authorization": f"Bearer {MINIMAX_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "speech-2.6-hd",
+            "text": text,
+            "voice_setting": {
+                "voice_id": voice_id,
+                "speed": 1.0,
+                "vol": 1.0,
+                "pitch": 0
+            },
+            "audio_setting": {
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3"
+            }
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        if response.status_code != 200:
+             raise Exception(f"Minimax API Error: {response.text}")
+        
+        res_json = response.json()
+        audio_hex = res_json.get("data", {}).get("audio")
+        if not audio_hex:
+             raise Exception("No audio data returned")
+             
+        audio_data = bytes.fromhex(audio_hex)
+
+        # 3. Save to Cache
+        with open(cache_path, 'wb') as f:
+            f.write(audio_data)
+
+        from io import BytesIO
+        return send_file(
+            BytesIO(audio_data),
+            mimetype="audio/mpeg",
+            as_attachment=False
+        )
+
+    except Exception as e:
+        logger.error(f"Preview generation failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = 8000

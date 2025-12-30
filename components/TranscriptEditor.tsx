@@ -17,7 +17,7 @@ const TranscriptItem = memo(({ seg, isActive, id }: { seg: TranscriptSegment, is
       }`}>
       <div className="flex-shrink-0">
         <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-transform duration-300 ${isActive ? 'scale-110' : ''
-          } ${seg.speaker.includes('A') || seg.speaker.toLowerCase().includes('david') ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'
+          } ${seg?.speaker?.includes('A') || seg?.speaker?.toLowerCase().includes('david') ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'
           }`}>
           <User className="w-5 h-5" />
         </div>

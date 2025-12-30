@@ -38,7 +38,8 @@ class JobStorage:
             },
             "created_at": str(datetime.now()),
             "last_updated": str(datetime.now()),
-            "error": None
+            "error": None,
+            "files": []  # List of {name, type, path}
         }
         with self.lock:
             with open(self._get_status_file(job_id), 'w', encoding='utf-8') as f:
@@ -46,6 +47,37 @@ class JobStorage:
             # Create empty log file
             open(self._get_log_file(job_id), 'w').close()
         return job_id
+
+    def add_file(self, job_id, name, file_type, path):
+        """Adds a file to the job's file list"""
+        with self.lock:
+            file_path = self._get_status_file(job_id)
+            if not os.path.exists(file_path): return
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if 'files' not in data:
+                data['files'] = []
+                
+            # Avoid duplicates (by name)
+            existing = [f for f in data['files'] if f['name'] == name]
+            if existing:
+                existing[0]['type'] = file_type
+                existing[0]['path'] = path
+                existing[0]['timestamp'] = str(datetime.now())
+            else:
+                data['files'].append({
+                    "name": name,
+                    "type": file_type,
+                    "path": path,
+                    "timestamp": str(datetime.now())
+                })
+                
+            data['last_updated'] = str(datetime.now())
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
 
     def update_job(self, job_id, **kwargs):
         with self.lock:
